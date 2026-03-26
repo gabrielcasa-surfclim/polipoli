@@ -1,100 +1,104 @@
 import os
-import sys
 import time
+import sys
 import traceback
-from typing import Callable, TypeVar
+import requests
 
-from dotenv import load_dotenv
-
-from config import (
-    HEARTBEAT_INTERVAL_HOURS,
-    IS_RENDER,
-    MAX_CONSECUTIVE_ERRORS,
-    SCAN_INTERVAL_SECONDS,
-    logger,
-)
 from telegram_bot import TelegramBot
-
-T = TypeVar("T")
-
-
-if not IS_RENDER:
-    load_dotenv()
+from config import logger, SCAN_INTERVAL_SECONDS, HEARTBEAT_INTERVAL_HOURS
 
 
-def run_with_backoff(func: Callable[[], T], max_retries: int = 5) -> T:
-    last_error: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except Exception as exc:  # pragma: no cover
-            last_error = exc
-            wait_seconds = 2 ** attempt
-            logger.warning(
-                "Falha na execução (tentativa %s/%s): %s. Aguardando %ss.",
-                attempt + 1,
-                max_retries,
-                exc,
-                wait_seconds,
-            )
-            time.sleep(wait_seconds)
-    raise RuntimeError(f"Falha após {max_retries} tentativas: {last_error}")
+GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
 
 
-def example_scanner_cycle() -> None:
-    """Ponto de entrada do scanner real futuramente.
+def fetch_active_markets(limit: int = 10):
+    response = requests.get(
+        GAMMA_MARKETS_URL,
+        params={
+            "active": "true",
+            "closed": "false",
+            "limit": limit,
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json()
 
-    Hoje ele apenas registra um log de ciclo para confirmar que o worker está vivo.
-    """
-    logger.info("Ciclo do scanner executado.")
+    if not isinstance(data, list):
+        return []
+
+    markets = []
+    for item in data[:limit]:
+        question = item.get("question", "Sem pergunta")
+        volume = item.get("volume", 0)
+        slug = item.get("slug", "")
+        markets.append({
+            "question": question,
+            "volume": volume,
+            "slug": slug,
+        })
+    return markets
 
 
-def main() -> None:
+def format_markets_message(markets):
+    if not markets:
+        return "⚠️ Scanner online, mas não encontrou mercados ativos."
+
+    lines = ["📊 Top mercados ativos no Polymarket:"]
+    for i, market in enumerate(markets, start=1):
+        lines.append(
+            f"{i}. {market['question']} | volume: {market['volume']}"
+        )
+    return "\n".join(lines)
+
+
+def main():
     bot = TelegramBot()
-    run_with_backoff(lambda: bot.send("✅ <b>Scanner iniciado no Render.</b>"))
+    bot.send("✅ Scanner Polymarket online no Render.")
 
     last_heartbeat = time.time()
+    last_market_report = 0
     consecutive_errors = 0
-
-    logger.info("Worker iniciado. Ambiente Render=%s", IS_RENDER)
+    max_consecutive_errors = 5
 
     while True:
         try:
-            run_with_backoff(example_scanner_cycle)
-
             now = time.time()
-            if now - last_heartbeat >= HEARTBEAT_INTERVAL_HOURS * 3600:
-                message = "💚 <b>Heartbeat:</b> scanner ainda vivo."
-                run_with_backoff(lambda: bot.send(message))
-                last_heartbeat = now
+
+            if now - last_market_report > 3600:
+                markets = fetch_active_markets(limit=10)
+                message = format_markets_message(markets)
+                bot.send(message)
+                logger.info("Resumo de mercados enviado.")
+                last_market_report = now
+
+            if now - last_heartbeat > HEARTBEAT_INTERVAL_HOURS * 3600:
+                bot.send("💚 Heartbeat: scanner ainda vivo.")
                 logger.info("Heartbeat enviado.")
+                last_heartbeat = now
 
             consecutive_errors = 0
             time.sleep(SCAN_INTERVAL_SECONDS)
 
-        except Exception as exc:
+        except Exception as e:
             consecutive_errors += 1
-            trace = traceback.format_exc()
-            logger.error("Erro no scanner (%s/%s): %s\n%s", consecutive_errors, MAX_CONSECUTIVE_ERRORS, exc, trace)
+            logger.error(f"Erro no scanner: {e}")
+            logger.error(traceback.format_exc())
 
             try:
-                bot.send(f"⚠️ <b>Erro no scanner</b>: {str(exc)[:300]}")
+                bot.send(f"⚠️ ERRO no scanner: {str(e)[:150]}")
             except Exception:
-                logger.exception("Falha ao enviar alerta de erro no Telegram.")
+                pass
 
-            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            if consecutive_errors >= max_consecutive_errors:
                 try:
-                    bot.send("🔥 <b>Crítico:</b> múltiplos erros consecutivos. Encerrando para o Render reiniciar.")
+                    bot.send("🔥 CRÍTICO: muitos erros consecutivos. Reiniciando worker.")
                 except Exception:
-                    logger.exception("Falha ao enviar alerta crítico no Telegram.")
-
-                logger.critical("Encerrando processo para reinício automático pelo Render.")
+                    pass
                 sys.exit(1)
 
-            time.sleep(min(60, SCAN_INTERVAL_SECONDS * 2))
+            time.sleep(60)
 
 
 if __name__ == "__main__":
-    if not os.getenv("TELEGRAM_BOT_TOKEN") or not os.getenv("TELEGRAM_CHAT_ID"):
-        logger.warning("Variáveis TELEGRAM_BOT_TOKEN e/ou TELEGRAM_CHAT_ID ausentes.")
     main()
