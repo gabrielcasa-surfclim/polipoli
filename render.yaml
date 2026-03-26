@@ -1,0 +1,18 @@
+services:
+  - type: worker
+    name: polymarket-ids-scanner
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python src/main.py
+    autoDeploy: true
+    envVars:
+      - key: SCAN_INTERVAL
+        value: "30"
+      - key: HEARTBEAT_HOURS
+        value: "6"
+      - key: MAX_CONSECUTIVE_ERRORS
+        value: "5"
+      - key: IDS_THRESHOLD
+        value: "70"
+      - key: LOG_LEVEL
+        value: "INFO"
