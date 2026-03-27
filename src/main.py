@@ -8,7 +8,7 @@ from config import logger, SCAN_INTERVAL_SECONDS, HEARTBEAT_INTERVAL_HOURS
 
 
 GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
-PRICE_ALERT_THRESHOLD = 0.05  # 5%
+PRICE_ALERT_THRESHOLD = 0.02  # 2%
 
 
 def fetch_active_markets(limit: int = 25):
